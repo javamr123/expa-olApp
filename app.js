@@ -20,6 +20,7 @@ const state = {
   pairs: [],
   // 用于区分“当前正在执行的朗读链”和“用户触发跳转/暂停后作废的旧朗读链”
   playToken: 0,
+  retryAfterVisible: false,
   settings: {
     repeatCount: DEFAULT_REPEAT_COUNT,
     waitSeconds: DEFAULT_WAIT_SECONDS,
@@ -317,7 +318,50 @@ function speakText(text, opts = {}) {
   });
 }
 
-async function playCurrentPair() {
+async function waitUnlessHiddenOrTokenChanged(ms, token) {
+  const wait = Number(ms);
+  if (!Number.isFinite(wait) || wait <= 0) return;
+
+  // iOS 后台/锁屏时，JS 定时器可能被无限期延迟，导致播放链“卡住”。
+  // 若检测到页面不可见，直接跳过等待，确保后续还能继续播放。
+  if (document.hidden) return;
+  if (token !== state.playToken) return;
+
+  await new Promise((resolve) => {
+    const start = performance.now();
+    const tick = () => {
+      if (token !== state.playToken) return resolve();
+      if (document.hidden) return resolve();
+      if (performance.now() - start >= wait) return resolve();
+      setTimeout(tick, 80);
+    };
+    setTimeout(tick, 10);
+  });
+}
+
+function makeWaitTailForTts(waitSeconds) {
+  const s = Number(waitSeconds);
+  if (!Number.isFinite(s) || s <= 0) return "";
+  // iOS Web Speech 无显式 break time，这里用大量逗号制造“停顿感”
+  const commas = Math.min(80, Math.max(1, Math.round(s * 8)));
+  return " " + new Array(commas).fill(",").join(" ");
+}
+
+function enqueueUtterance(text, opts) {
+  const u = new SpeechSynthesisUtterance(text);
+  if (opts.lang) u.lang = opts.lang;
+  if (opts.voice) u.voice = opts.voice;
+  if (typeof opts.rate === "number") u.rate = opts.rate;
+  u.pitch = typeof opts.pitch === "number" ? opts.pitch : u.pitch;
+  u.volume = typeof opts.volume === "number" ? opts.volume : u.volume;
+  if (opts.onend) u.onend = opts.onend;
+  if (opts.onerror) u.onerror = opts.onerror;
+  if (opts.onstart) u.onstart = opts.onstart;
+  window.speechSynthesis.speak(u);
+  return u;
+}
+
+function playCurrentPair() {
   if (!state.pairs.length || !state.dayBatchIds.length) return;
 
   const token = (state.playToken += 1);
@@ -332,16 +376,17 @@ async function playCurrentPair() {
   const pair = state.pairs[pairId];
   if (!pair) return;
 
-  // 开始时：假如是 esThenZh，先只显示西语
   const mode = $("#displayMode").value;
-  $("#esText").dataset.inZh = "0";
-  if (mode === "esOnly") $("#zhText").style.display = "none";
-  if (mode === "esThenZh") $("#zhText").style.display = "none";
-  if (mode === "both") $("#zhText").style.display = "block";
 
   // 更新文本
   $("#esText").textContent = pair.es;
   $("#zhText").textContent = pair.zh;
+
+  // 显示策略初始化
+  $("#esText").dataset.inZh = "0";
+  if (mode === "esOnly") $("#zhText").style.display = "none";
+  if (mode === "esThenZh") $("#zhText").style.display = "none";
+  if (mode === "both") $("#zhText").style.display = "block";
   updateUI();
 
   const voices = window.__voicesCache || [];
@@ -359,66 +404,69 @@ async function playCurrentPair() {
 
   const esRate = Number($("#esRate").value);
   const esForTts = normalizeSpanishForTTS(pair.es);
-  const esForTtsWithWordPauses = applyWordPausesToSpanishText(esForTts, state.settings.wordPauseMs);
+  const esForTtsWithWordPauses = applyWordPausesToSpanishText(
+    esForTts,
+    state.settings.wordPauseMs
+  );
   const repeatCount = state.settings.repeatCount;
-  const waitMs = state.settings.waitMs;
+  const waitTail = makeWaitTailForTts(state.settings.waitSeconds);
 
+  // 清空上一轮队列（避免叠音）
   cancelSpeech();
+
   try {
+    // 把“当前对的整套 ES/中文重复”直接排队给 speechSynthesis，
+    // 尽量避免依赖 JS 的 setTimeout/await 链在锁屏时被挂起。
     for (let rep = 0; rep < repeatCount; rep++) {
       if (token !== state.playToken) return;
 
-      // 每次重复的开始：按显示模式重置中文显示状态
-      $("#esText").dataset.inZh = "0";
-      if (mode === "esOnly") $("#zhText").style.display = "none";
-      if (mode === "esThenZh") $("#zhText").style.display = "none";
-      if (mode === "both") $("#zhText").style.display = "block";
-      updateUI();
-
-      cancelSpeech();
-      await speakText(esForTtsWithWordPauses, {
+      // ES：结束后显示/切换到中文
+      enqueueUtterance(esForTtsWithWordPauses, {
         voice: voiceEs || undefined,
         lang: voiceEs?.lang || "es-ES",
         rate: esRate,
+        onend: () => {
+          if (token !== state.playToken) return;
+          $("#esText").dataset.inZh = "1";
+          if ($("#displayMode").value === "esThenZh") $("#zhText").style.display = "block";
+          updateUI();
+        },
       });
-      if (token !== state.playToken) return;
 
-      // 西语结束 -> 中文开始
-      $("#esText").dataset.inZh = "1";
-      if ($("#displayMode").value === "esThenZh") $("#zhText").style.display = "block";
-      updateUI();
-
-      cancelSpeech(); // 避免上一次残留影响
-      await speakText(pair.zh, {
+      // 中文：文本末尾带“等待尾巴”，让下一条开始前出现停顿感
+      const isLastRep = rep === repeatCount - 1;
+      enqueueUtterance(pair.zh + (isLastRep ? waitTail : waitTail), {
         voice: voiceZh || undefined,
         lang: voiceZh?.lang || "zh-CN",
         rate: 1.0,
-      });
-      if (token !== state.playToken) return;
+        onend: () => {
+          if (token !== state.playToken) return;
 
-      // 中文结束 -> 等待（用于重复下一次/或下一对）
-      await new Promise((r) => setTimeout(r, waitMs));
-      if (token !== state.playToken) return;
-    }
+          if (!isLastRep) {
+            // 下一轮 ES 开始前，隐藏中文（仅 esThenZh）
+            $("#esText").dataset.inZh = "0";
+            if ($("#displayMode").value === "esThenZh") $("#zhText").style.display = "none";
+            updateUI();
+            return;
+          }
 
-    // 自动推进下一对：达到 50 后重复当天这一批
-    state.todayTotalCompleted += 1;
-    state.dayBatchPointer += 1;
-    if (state.dayBatchPointer >= state.dayBatchIds.length) {
-      state.dayBatchPointer = 0;
-    }
+          // 自动推进下一对：达到 50 后重复当天这一批
+          state.todayTotalCompleted += 1;
+          state.dayBatchPointer += 1;
+          if (state.dayBatchPointer >= state.dayBatchIds.length) {
+            state.dayBatchPointer = 0;
+          }
 
-    setState();
-    updateUI();
+          setState();
+          updateUI();
 
-    if (state.isPlaying && !state.isPaused) {
-      playCurrentPair().catch(() => {
-        // 若 TTS 报错，停止播放避免无限报错
-        stopPlaying("TTS 播放失败，请手动检查声音权限或浏览器设置。");
+          if (state.isPlaying && !state.isPaused) {
+            playCurrentPair();
+          }
+        },
       });
     }
   } catch (e) {
-    // 如果是“用户点了下一对/上一对/暂停/重置”导致的取消，就别把播放停掉
     if (token !== state.playToken) return;
     stopPlaying("TTS 播放失败，请手动点击“开始播放”，并检查浏览器是否允许语音。");
   }
@@ -448,7 +496,7 @@ function startPlaying() {
   $("#btnStart").disabled = true;
   $("#btnPause").disabled = false;
   $("#btnResume").disabled = true;
-  playCurrentPair().catch(() => {});
+  playCurrentPair();
 }
 
 function pausePlaying() {
@@ -465,7 +513,7 @@ function resumePlaying() {
   state.isPaused = false;
   $("#btnPause").disabled = false;
   $("#btnResume").disabled = true;
-  playCurrentPair().catch(() => {});
+  playCurrentPair();
 }
 
 function nextPair() {
@@ -475,7 +523,7 @@ function nextPair() {
   if (state.dayBatchPointer >= state.dayBatchIds.length) state.dayBatchPointer = 0;
   setState();
   updateUI();
-  if (state.isPlaying && !state.isPaused) playCurrentPair().catch(() => {});
+  if (state.isPlaying && !state.isPaused) playCurrentPair();
 }
 
 function prevPair() {
@@ -485,7 +533,7 @@ function prevPair() {
   state.dayBatchPointer = Math.max(0, state.dayBatchPointer - 1);
   setState();
   updateUI();
-  if (state.isPlaying && !state.isPaused) playCurrentPair().catch(() => {});
+  if (state.isPlaying && !state.isPaused) playCurrentPair();
 }
 
 function resetToday() {
@@ -725,6 +773,18 @@ async function init() {
   loadSettings();
   applySettingsToUI();
   initVoices();
+
+  // iOS 锁屏/切后台后，Web Speech 的回调/定时器可能会延迟或失败；
+  // 我们在页面重新可见时做一次“补偿重启”，避免你说的播完不继续。
+  document.addEventListener("visibilitychange", () => {
+    if (!state.ready) return;
+    if (document.visibilityState === "visible") {
+      if (state.retryAfterVisible && state.isPlaying && !state.isPaused) {
+        state.retryAfterVisible = false;
+        playCurrentPair();
+      }
+    }
+  });
 
   try {
     await loadCSV();
