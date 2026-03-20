@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>西语听读阅读器</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="header">
+        <div class="title">
+          <h1>西语听读阅读器</h1>
+          <p class="subtitle">每天 50 对（西语+中文）自动听；可调语速；Chrome 里先点“开始”。</p>
+        </div>
+        <div class="day-info">
+          <div class="chip">
+            <span class="chip-label">今天</span>
+            <span id="todayStr" class="chip-value">-</span>
+          </div>
+          <div class="chip">
+            <span class="chip-label">进度</span>
+            <span id="progressStr" class="chip-value">-</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="card">
+        <div class="pair-display">
+          <div class="lang-block">
+            <div class="lang-label">西班牙语</div>
+            <div id="esText" class="es-text">加载中…</div>
+          </div>
+          <div class="lang-block">
+            <div class="lang-label">中文翻译</div>
+            <div id="zhText" class="zh-text">加载中…</div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <div class="row">
+            <button id="btnStart" class="btn btn-primary" type="button">开始播放</button>
+            <button id="btnPause" class="btn" type="button" disabled>暂停</button>
+            <button id="btnResume" class="btn" type="button" disabled>继续</button>
+            <button id="btnNext" class="btn" type="button">下一对</button>
+            <button id="btnPrev" class="btn" type="button">上一对</button>
+          </div>
+
+          <div class="row settings">
+            <label class="setting">
+              <span>显示模式</span>
+              <select id="displayMode" class="select">
+                <option value="both">西语+中文同显</option>
+                <option value="esOnly">只显示西语</option>
+                <option value="esThenZh">西语播完再显示中文</option>
+              </select>
+            </label>
+
+            <label class="setting">
+              <span>西语语速：<b id="esRateLabel">0.60</b></span>
+              <input id="esRate" class="slider" type="range" min="0.2" max="1.6" step="0.05" value="0.6" />
+            </label>
+
+            <label class="setting">
+              <span>每句重复：<b id="repeatCountLabel">5</b> 次</span>
+              <input id="repeatCount" class="slider" type="range" min="1" max="10" step="1" value="5" />
+            </label>
+
+            <label class="setting">
+              <span>每次结束等待：<b id="waitSecondsLabel">3.0</b> 秒</span>
+              <input id="waitSeconds" class="slider" type="range" min="0" max="10" step="0.5" value="3" />
+            </label>
+
+            <label class="setting">
+              <span>语音（如果可选）</span>
+              <div class="voice-row">
+                <select id="voiceEs" class="select"></select>
+                <select id="voiceZh" class="select"></select>
+              </div>
+              <div class="hint">若没有对应声音，会自动使用系统默认语音。</div>
+            </label>
+          </div>
+
+          <div class="row footer-controls">
+            <div class="hint">
+              切换下一对时：中文结束后等待 <span id="waitSecondsHint">3.0</span> 秒，再开始下一条西语。
+            </div>
+            <button id="btnResetDay" class="btn btn-ghost" type="button" title="清除今天进度并重新开始当日 50 对">重置今天</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
+
