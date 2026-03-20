@@ -24,6 +24,7 @@ const state = {
     repeatCount: DEFAULT_REPEAT_COUNT,
     waitSeconds: DEFAULT_WAIT_SECONDS,
     waitMs: DEFAULT_WAIT_SECONDS * 1000,
+    wordPauseMs: 0, // 词间停顿（近似），0 表示禁用
   },
   // ids: 保存每条的原始行 id（用于洗牌与进度）
   dayBatchIds: [],
@@ -79,9 +80,29 @@ function normalizeSpanishForTTS(text) {
   // Web Speech 对引号/破折号有时会读得很含糊；对西语做轻量清洗提升清晰度
   let t = safeText(text);
   t = t.replace(/"/g, ""); // 去掉双引号
+  // 保留西语倒问号/倒感叹号（¿¡），否则句子语调可能会变得“不对”
   t = t.replace(/[—–]/g, " "); // em/en dash -> space
+  t = t.replace(/…/g, "..."); // ellipsis
   t = t.replace(/\s+/g, " ").trim();
   return t;
+}
+
+function applyWordPausesToSpanishText(text, pauseMs) {
+  // 说明：Web Speech API 不支持精确控制“每个词的毫秒停顿”，
+  // 我们只能通过插入逗号来制造更长的停顿（近似）。
+  const p = Number(pauseMs);
+  if (!Number.isFinite(p) || p <= 0) return text;
+
+  const tokens = String(text)
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+
+  // 粗略估计：每个逗号大概对应 120ms 左右的额外停顿（不同设备会不同）
+  const commaGroups = Math.min(4, Math.max(1, Math.round(p / 150)));
+  const sep = " " + new Array(commaGroups).fill(",").join(" ") + " ";
+  return tokens.join(sep);
 }
 
 function parseCSV(text) {
@@ -182,6 +203,7 @@ function loadSettings() {
 
     const repeatCount = Number(parsed?.repeatCount);
     const waitSeconds = Number(parsed?.waitSeconds);
+    const wordPauseMs = Number(parsed?.wordPauseMs);
 
     if (Number.isFinite(repeatCount)) {
       state.settings.repeatCount = Math.min(10, Math.max(1, Math.round(repeatCount)));
@@ -190,6 +212,9 @@ function loadSettings() {
       const clamped = Math.min(10, Math.max(0, waitSeconds));
       state.settings.waitSeconds = clamped;
       state.settings.waitMs = clamped * 1000;
+    }
+    if (Number.isFinite(wordPauseMs)) {
+      state.settings.wordPauseMs = Math.min(400, Math.max(0, Math.round(wordPauseMs / 50) * 50));
     }
   } catch {
     // ignore
@@ -200,6 +225,7 @@ function saveSettings() {
   const persist = {
     repeatCount: state.settings.repeatCount,
     waitSeconds: state.settings.waitSeconds,
+    wordPauseMs: state.settings.wordPauseMs,
   };
   localStorage.setItem(SETTINGS_LS_KEY, JSON.stringify(persist));
 }
@@ -220,6 +246,11 @@ function applySettingsToUI() {
 
   const waitHint = $("#waitSecondsHint");
   if (waitHint) waitHint.textContent = Number(waitSeconds).toFixed(1);
+
+  const wordPauseSlider = $("#wordPauseMs");
+  const wordPauseLabel = $("#wordPauseLabel");
+  if (wordPauseSlider) wordPauseSlider.value = String(state.settings.wordPauseMs);
+  if (wordPauseLabel) wordPauseLabel.textContent = String(state.settings.wordPauseMs);
 }
 
 function updateUI() {
@@ -328,6 +359,7 @@ async function playCurrentPair() {
 
   const esRate = Number($("#esRate").value);
   const esForTts = normalizeSpanishForTTS(pair.es);
+  const esForTtsWithWordPauses = applyWordPausesToSpanishText(esForTts, state.settings.wordPauseMs);
   const repeatCount = state.settings.repeatCount;
   const waitMs = state.settings.waitMs;
 
@@ -344,7 +376,7 @@ async function playCurrentPair() {
       updateUI();
 
       cancelSpeech();
-      await speakText(esForTts, {
+      await speakText(esForTtsWithWordPauses, {
         voice: voiceEs || undefined,
         lang: voiceEs?.lang || "es-ES",
         rate: esRate,
@@ -617,6 +649,13 @@ function wireUI() {
     state.settings.waitMs = clamped * 1000;
     $("#waitSecondsLabel").textContent = Number(clamped).toFixed(1);
     $("#waitSecondsHint").textContent = Number(clamped).toFixed(1);
+    saveSettings();
+  });
+
+  $("#wordPauseMs").addEventListener("input", () => {
+    const v = Number($("#wordPauseMs").value);
+    state.settings.wordPauseMs = Math.min(400, Math.max(0, Math.round(v / 50) * 50));
+    $("#wordPauseLabel").textContent = String(state.settings.wordPauseMs);
     saveSettings();
   });
 
