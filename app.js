@@ -11,6 +11,10 @@ const SETTINGS_LS_KEY = "spanish_reader_settings_v1";
 const DEFAULT_REPEAT_COUNT = 5; // 每句（西语+中文这对）默认重复次数
 const DEFAULT_WAIT_SECONDS = 3; // 中文结束 -> 下一次朗读/下一条之间等待（秒）
 
+// iOS 后台可能延迟 onend 回调；为了避免“播完就停”，一次性预排队接下来若干对
+//（不做整天全量预排队，避免队列过长不稳定）
+const QUEUE_AHEAD_PAIRS = 100;
+
 const $ = (sel) => document.querySelector(sel);
 
 const state = {
@@ -368,26 +372,9 @@ function playCurrentPair() {
 
   // 若页面一直开着到第二天：切换到“当天”的 50 对批次
   const today = getLocalDateStr();
-  if (state.todayStr !== today) {
-    buildTodayBatchIfNeeded();
-  }
-
-  const pairId = state.dayBatchIds[state.dayBatchPointer];
-  const pair = state.pairs[pairId];
-  if (!pair) return;
+  if (state.todayStr !== today) buildTodayBatchIfNeeded();
 
   const mode = $("#displayMode").value;
-
-  // 更新文本
-  $("#esText").textContent = pair.es;
-  $("#zhText").textContent = pair.zh;
-
-  // 显示策略初始化
-  $("#esText").dataset.inZh = "0";
-  if (mode === "esOnly") $("#zhText").style.display = "none";
-  if (mode === "esThenZh") $("#zhText").style.display = "none";
-  if (mode === "both") $("#zhText").style.display = "block";
-  updateUI();
 
   const voices = window.__voicesCache || [];
   const voiceEsSelected = $("#voiceEs").value;
@@ -403,68 +390,81 @@ function playCurrentPair() {
     null;
 
   const esRate = Number($("#esRate").value);
-  const esForTts = normalizeSpanishForTTS(pair.es);
-  const esForTtsWithWordPauses = applyWordPausesToSpanishText(
-    esForTts,
-    state.settings.wordPauseMs
-  );
   const repeatCount = state.settings.repeatCount;
   const waitTail = makeWaitTailForTts(state.settings.waitSeconds);
 
-  // 清空上一轮队列（避免叠音）
+  // iOS 锁屏时：依赖 onend 回调容易停，这里做“滚动预排队”。
+  const totalPairs = state.dayBatchIds.length;
+  const startPointer = state.dayBatchPointer;
+  const pairsAhead = Math.min(QUEUE_AHEAD_PAIRS, totalPairs);
+
   cancelSpeech();
 
+  // 预排队窗口最后一个“对”的索引（闭包里用）
+  const lastQueuedPointer = (startPointer + pairsAhead - 1) % totalPairs;
+
   try {
-    // 把“当前对的整套 ES/中文重复”直接排队给 speechSynthesis，
-    // 尽量避免依赖 JS 的 setTimeout/await 链在锁屏时被挂起。
-    for (let rep = 0; rep < repeatCount; rep++) {
+    for (let k = 0; k < pairsAhead; k++) {
       if (token !== state.playToken) return;
 
-      // ES：结束后显示/切换到中文
-      enqueueUtterance(esForTtsWithWordPauses, {
-        voice: voiceEs || undefined,
-        lang: voiceEs?.lang || "es-ES",
-        rate: esRate,
-        onend: () => {
-          if (token !== state.playToken) return;
-          $("#esText").dataset.inZh = "1";
-          if ($("#displayMode").value === "esThenZh") $("#zhText").style.display = "block";
-          updateUI();
-        },
-      });
+      const idx = (startPointer + k) % totalPairs;
+      const pairId = state.dayBatchIds[idx];
+      const pair = state.pairs[pairId];
+      if (!pair) continue;
 
-      // 中文：文本末尾带“等待尾巴”，让下一条开始前出现停顿感
-      const isLastRep = rep === repeatCount - 1;
-      enqueueUtterance(pair.zh + (isLastRep ? waitTail : waitTail), {
-        voice: voiceZh || undefined,
-        lang: voiceZh?.lang || "zh-CN",
-        rate: 1.0,
-        onend: () => {
-          if (token !== state.playToken) return;
+      const esForTts = normalizeSpanishForTTS(pair.es);
+      const esForTtsWithWordPauses = applyWordPausesToSpanishText(
+        esForTts,
+        state.settings.wordPauseMs
+      );
 
-          if (!isLastRep) {
-            // 下一轮 ES 开始前，隐藏中文（仅 esThenZh）
+      const isLastQueuedPair = idx === lastQueuedPointer;
+
+      for (let rep = 0; rep < repeatCount; rep++) {
+        if (token !== state.playToken) return;
+
+        const isLastRep = rep === repeatCount - 1;
+
+        enqueueUtterance(esForTtsWithWordPauses, {
+          voice: voiceEs || undefined,
+          lang: voiceEs?.lang || "es-ES",
+          rate: esRate,
+          onstart: () => {
+            if (token !== state.playToken) return;
+            $("#esText").textContent = pair.es;
+            $("#zhText").textContent = pair.zh;
             $("#esText").dataset.inZh = "0";
-            if ($("#displayMode").value === "esThenZh") $("#zhText").style.display = "none";
+            if (mode === "esOnly" || mode === "esThenZh") $("#zhText").style.display = "none";
+            if (mode === "both") $("#zhText").style.display = "block";
             updateUI();
-            return;
-          }
+          },
+          onend: () => {
+            if (token !== state.playToken) return;
+            $("#esText").dataset.inZh = "1";
+            if ($("#displayMode").value === "esThenZh") $("#zhText").style.display = "block";
+            updateUI();
+          },
+        });
 
-          // 自动推进下一对：达到 50 后重复当天这一批
-          state.todayTotalCompleted += 1;
-          state.dayBatchPointer += 1;
-          if (state.dayBatchPointer >= state.dayBatchIds.length) {
-            state.dayBatchPointer = 0;
-          }
+        // 中文：末尾附加等待尾巴，让下一次西语开始前有停顿感
+        enqueueUtterance(pair.zh + waitTail, {
+          voice: voiceZh || undefined,
+          lang: voiceZh?.lang || "zh-CN",
+          rate: 1.0,
+          onend: () => {
+            if (token !== state.playToken) return;
 
-          setState();
-          updateUI();
-
-          if (state.isPlaying && !state.isPaused) {
-            playCurrentPair();
-          }
-        },
-      });
+            // 只在“预排队窗口最后一对的最后一次中文”时推进到下一窗口
+            if (isLastQueuedPair && isLastRep) {
+              state.todayTotalCompleted += pairsAhead;
+              state.dayBatchPointer = (startPointer + pairsAhead) % totalPairs;
+              setState();
+              updateUI();
+              if (state.isPlaying && !state.isPaused) playCurrentPair();
+            }
+          },
+        });
+      }
     }
   } catch (e) {
     if (token !== state.playToken) return;
