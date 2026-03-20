@@ -559,15 +559,29 @@ function initVoices() {
     }
 
     // 选择“最像”的默认；优先使用你指定的 Google español (es-ES)
+    const lowerVoices = (voices || []).map((v) => ({
+      v,
+      nameLower: String(v.name || "").toLowerCase(),
+      langLower: String(v.lang || "").toLowerCase(),
+    }));
+
+    // 1) 绝对优先：es-ES / España / Spain
+    const spainEs =
+      lowerVoices.find((x) => x.langLower === "es-es")?.v ||
+      lowerVoices.find((x) => x.langLower.includes("es-es"))?.v ||
+      lowerVoices.find((x) => x.nameLower.includes("españa"))?.v ||
+      lowerVoices.find((x) => x.nameLower.includes("spain"))?.v ||
+      null;
+
+    // 2) 其次：你桌面端截图的 Google español（es-ES）
     const googleEs =
-      (voices || []).find(
-        (v) =>
-          String(v.name || "")
-            .toLowerCase()
-            .includes("google español") &&
-          String(v.lang || "").toLowerCase().includes("es-es")
-      ) || null;
-    const defEs = googleEs || pickVoiceByLang(esPick, "es") || esPick[0] || null;
+      lowerVoices.find(
+        (x) =>
+          x.nameLower.includes("google español") && x.langLower.includes("es-es")
+      )?.v || null;
+
+    // 3) 最后：普通西语 voice
+    const defEs = spainEs || googleEs || pickVoiceByLang(esPick, "es") || esPick[0] || null;
     const defZh = pickVoiceByLang(zhPick, "zh") || zhPick[0] || null;
     if (defEs) voiceEs.value = String(defEs.name);
     if (defZh) voiceZh.value = String(defZh.name);
