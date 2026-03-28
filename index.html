@@ -11,7 +11,7 @@
       <header class="header">
         <div class="title">
           <h1>西语听读阅读器</h1>
-          <p class="subtitle">每天 50 对（西语+中文）自动听；可调语速；Chrome 里先点“开始”。</p>
+          <p class="subtitle">每天 50 对（西语+中文）自动听；可调语速；Chrome 里先点“开始”。可选「屏幕常亮」在播放时保持唤醒。</p>
         </div>
         <div class="day-info">
           <div class="chip">
@@ -47,6 +47,14 @@
           </div>
 
           <div class="row settings">
+            <label class="setting setting-inline">
+              <input id="keepScreenOn" type="checkbox" />
+              <span>播放时屏幕常亮</span>
+            </label>
+            <div id="wakeLockHint" class="hint setting-hint">
+              依赖浏览器「唤醒锁」：Chrome / Edge / Android Chrome 较完整；iOS Safari 常不可用。页面需 HTTPS 或本机打开。
+            </div>
+
             <label class="setting">
               <span>显示模式</span>
               <select id="displayMode" class="select">

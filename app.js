@@ -13,6 +13,9 @@ const DEFAULT_WAIT_SECONDS = 3; // 中文结束 -> 下一次朗读/下一条之�
 
 const $ = (sel) => document.querySelector(sel);
 
+/** @type {WakeLockSentinel | null} */
+let wakeLockSentinel = null;
+
 const state = {
   ready: false,
   isPlaying: false,
@@ -26,6 +29,7 @@ const state = {
     waitSeconds: DEFAULT_WAIT_SECONDS,
     waitMs: DEFAULT_WAIT_SECONDS * 1000,
     wordPauseMs: 0, // 词间停顿（近似），0 表示禁用
+    keepScreenOn: false, // 播放时请求屏幕唤醒锁（依赖浏览器支持）
   },
   // ids: 保存每条的原始行 id（用于洗牌与进度）
   dayBatchIds: [],
@@ -75,6 +79,43 @@ function seedFromStr(str) {
 
 function safeText(v) {
   return String(v ?? "").replace(/\r?\n/g, " ").trim();
+}
+
+async function acquireScreenWakeLock() {
+  if (!("wakeLock" in navigator)) return;
+  if (wakeLockSentinel) return;
+  try {
+    wakeLockSentinel = await navigator.wakeLock.request("screen");
+    wakeLockSentinel.addEventListener("release", () => {
+      wakeLockSentinel = null;
+    });
+  } catch {
+    wakeLockSentinel = null;
+  }
+}
+
+function releaseScreenWakeLock() {
+  const lock = wakeLockSentinel;
+  if (!lock) return;
+  try {
+    lock.release();
+  } catch {
+    // ignore
+  }
+  wakeLockSentinel = null;
+}
+
+async function syncScreenWakeLock() {
+  const want =
+    state.settings.keepScreenOn &&
+    state.isPlaying &&
+    !state.isPaused &&
+    document.visibilityState === "visible";
+  if (!want) {
+    releaseScreenWakeLock();
+    return;
+  }
+  await acquireScreenWakeLock();
 }
 
 function normalizeSpanishForTTS(text) {
@@ -217,6 +258,9 @@ function loadSettings() {
     if (Number.isFinite(wordPauseMs)) {
       state.settings.wordPauseMs = Math.min(400, Math.max(0, Math.round(wordPauseMs / 50) * 50));
     }
+    if (typeof parsed?.keepScreenOn === "boolean") {
+      state.settings.keepScreenOn = parsed.keepScreenOn;
+    }
   } catch {
     // ignore
   }
@@ -227,6 +271,7 @@ function saveSettings() {
     repeatCount: state.settings.repeatCount,
     waitSeconds: state.settings.waitSeconds,
     wordPauseMs: state.settings.wordPauseMs,
+    keepScreenOn: state.settings.keepScreenOn,
   };
   localStorage.setItem(SETTINGS_LS_KEY, JSON.stringify(persist));
 }
@@ -252,6 +297,9 @@ function applySettingsToUI() {
   const wordPauseLabel = $("#wordPauseLabel");
   if (wordPauseSlider) wordPauseSlider.value = String(state.settings.wordPauseMs);
   if (wordPauseLabel) wordPauseLabel.textContent = String(state.settings.wordPauseMs);
+
+  const keepCb = $("#keepScreenOn");
+  if (keepCb) keepCb.checked = !!state.settings.keepScreenOn;
 }
 
 function updateUI() {
@@ -457,6 +505,7 @@ async function playCurrentPair() {
 function stopPlaying(message) {
   state.isPlaying = false;
   state.isPaused = false;
+  releaseScreenWakeLock();
   cancelSpeech();
   const pauseBtn = $("#btnPause");
   const resumeBtn = $("#btnResume");
@@ -478,12 +527,14 @@ function startPlaying() {
   $("#btnStart").disabled = true;
   $("#btnPause").disabled = false;
   $("#btnResume").disabled = true;
+  void syncScreenWakeLock().catch(() => {});
   playCurrentPair().catch(() => {});
 }
 
 function pausePlaying() {
   if (!state.isPlaying) return;
   state.isPaused = true;
+  releaseScreenWakeLock();
   cancelSpeech({ bumpToken: true });
   $("#btnPause").disabled = true;
   $("#btnResume").disabled = false;
@@ -495,6 +546,7 @@ function resumePlaying() {
   state.isPaused = false;
   $("#btnPause").disabled = false;
   $("#btnResume").disabled = true;
+  void syncScreenWakeLock().catch(() => {});
   playCurrentPair().catch(() => {});
 }
 
@@ -689,6 +741,15 @@ function wireUI() {
     saveSettings();
   });
 
+  const keepCb = $("#keepScreenOn");
+  if (keepCb) {
+    keepCb.addEventListener("change", () => {
+      state.settings.keepScreenOn = keepCb.checked;
+      saveSettings();
+      void syncScreenWakeLock().catch(() => {});
+    });
+  }
+
   $("#displayMode").addEventListener("change", () => updateUI());
 }
 
@@ -760,6 +821,7 @@ async function init() {
   // 我们在页面重新可见时做一次“补偿重启”，避免你说的播完不继续。
   document.addEventListener("visibilitychange", () => {
     if (!state.ready) return;
+    void syncScreenWakeLock().catch(() => {});
     if (document.visibilityState === "visible") {
       if (state.retryAfterVisible && state.isPlaying && !state.isPaused) {
         state.retryAfterVisible = false;

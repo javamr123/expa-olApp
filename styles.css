@@ -162,6 +162,22 @@ body{
   min-width: 260px;
 }
 
+.setting-inline{
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  min-width: auto;
+}
+.setting-inline input[type="checkbox"]{
+  width: auto;
+  accent-color: var(--accent);
+}
+
+.setting-hint{
+  flex-basis: 100%;
+  margin: -2px 0 6px;
+}
+
 .select{
   width: 100%;
   padding: 9px 10px;
